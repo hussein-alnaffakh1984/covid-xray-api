@@ -1,110 +1,6 @@
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>COVID X-ray Classification (MobileNetV2)</title>
-  <style>
-    body { font-family: Arial, sans-serif; background:#f6f7fb; margin:0; }
-    .wrap { max-width: 980px; margin: 24px auto; padding: 0 16px; }
-    .card { background:#fff; border:1px solid #e6e8ef; border-radius:14px; padding:18px; box-shadow:0 8px 20px rgba(0,0,0,.05); }
-    .header { display:flex; align-items:center; justify-content:space-between; gap:14px; border-bottom:1px solid #eee; padding-bottom:14px; margin-bottom:14px; }
-    .left { text-align:left; font-size:12px; line-height:1.35; }
-    .mid { text-align:center; }
-    .mid img { height:70px; }
-    .right { text-align:right; font-size:12px; line-height:1.35; }
-    h1 { margin:10px 0 0; font-size:20px; }
-    .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
-    .btn { background:#111; color:#fff; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; }
-    .btn2 { background:#2d6cdf; }
-    .box { border:1px dashed #cfd6ea; padding:12px; border-radius:12px; background:#fbfcff; }
-    img.preview { width:100%; max-height:420px; object-fit:contain; border-radius:12px; border:1px solid #e6e8ef; background:#fff; }
-    .kv { font-size:14px; line-height:1.6; }
-    .muted { color:#666; font-size:12px; }
-    @media (max-width: 860px){ .grid{ grid-template-columns:1fr; } .right,.left{ display:none; } }
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="header">
-        <div class="left">
-          <div>Republic of Iraq</div>
-          <div>Ministry of Higher Education and Scientific Research</div>
-          <div>University of Alkafeel</div>
-          <div>College of Health & Medical Technology</div>
-          <div>Dept. of Radiology Techniques</div>
-        </div>
-
-        <div class="mid">
-          <img src="/static/logo.png" alt="Logo">
-          <h1>COVID X-ray Classification (MobileNetV2)</h1>
-          <div class="muted">Upload an X-ray image and get prediction + PDF report.</div>
-        </div>
-
-        <div class="right">
-          <div><b>Stage:</b> Fourth Year</div>
-          <div><b>Academic Year:</b> 2025–2026</div>
-        </div>
-      </div>
-
-      <div class="grid">
-        <div class="box">
-          <form action="/ui/predict" method="post" enctype="multipart/form-data">
-            <div class="muted">X-ray image</div>
-            <input type="file" name="file" accept="image/*" required />
-            <div style="height:10px"></div>
-
-            <div class="muted">Threshold (default 0.5)</div>
-            <input type="number" step="0.01" min="0" max="1" name="threshold" value="{{ threshold if threshold is not none else 0.5 }}" />
-
-            <div style="height:14px"></div>
-            <button class="btn" type="submit">Diagnose</button>
-          </form>
-
-          <div style="height:12px"></div>
-
-          <form action="/report" method="post" enctype="multipart/form-data">
-            <div class="muted">Download PDF report (re-upload same image)</div>
-            <input type="file" name="file" accept="image/*" required />
-            <input type="hidden" name="threshold" value="{{ threshold if threshold is not none else 0.5 }}">
-            <div style="height:10px"></div>
-            <button class="btn btn2" type="submit">Download PDF</button>
-          </form>
-        </div>
-
-        <div class="box">
-          {% if img_preview %}
-            <div class="muted">Uploaded image preview</div>
-            <div style="height:8px"></div>
-            <img class="preview" src="{{ img_preview }}" />
-          {% else %}
-            <div class="muted">Image preview will appear here after diagnosis.</div>
-          {% endif %}
-
-          {% if result %}
-            <div style="height:12px"></div>
-            <div class="kv">
-              <div><b>Prediction:</b> {{ result.prediction }}</div>
-              <div><b>Confidence:</b> {{ result.confidence }}%</div>
-              <div><b>Raw Sigmoid P(label=1):</b> {{ result.prob_label1 }}</div>
-              <div><b>Threshold:</b> {{ result.threshold }}</div>
-              <div class="muted">label0={{ result.label0 }}, label1={{ result.label1 }}</div>
-            </div>
-          {% endif %}
-        </div>
-      </div>
-
-      <div style="height:10px"></div>
-      <div class="muted">
-        Disclaimer: For educational/research use only. Not a standalone medical diagnosis.
-      </div>
-    </div>
-  </div>
-</body>
-</html>
 import io
 import os
+import base64
 from datetime import datetime
 
 import numpy as np
@@ -127,14 +23,14 @@ from reportlab.lib.utils import ImageReader
 # =========================
 # CONFIG
 # =========================
-CLASS_NAMES = ["COVID", "Normal"]
+CLASS_NAMES = ["COVID", "Normal"]  # label0, label1
 IMG_SIZE = (224, 224)
 
 WEIGHTS_PATH = "covid.weights.h5"
 LOGO_PATH = "static/logo.png"
 
 STAGE_TEXT = "Fourth Year"
-ACADEMIC_YEAR_TEXT = "Academic Year 2025–2026"
+ACADEMIC_YEAR_TEXT = "Academic Year 2025-2026"  # استخدم - بدل –
 
 LEFT_HEADER_LINES = [
     "Republic of Iraq",
@@ -150,6 +46,10 @@ LEFT_HEADER_LINES = [
 # APP
 # =========================
 app = FastAPI(title="COVID X-ray API (MobileNetV2)", version="1.0.0")
+
+# تأكد أن مجلد static موجود
+if not os.path.isdir("static"):
+    os.makedirs("static", exist_ok=True)
 
 app.mount("/static", StaticFiles(directory="static"), name="static")
 templates = Jinja2Templates(directory="templates")
@@ -184,7 +84,7 @@ if os.path.exists(WEIGHTS_PATH):
     model.load_weights(WEIGHTS_PATH)
     print("✅ Weights loaded")
 else:
-    print("❌ Weights file not found")
+    print(f"❌ Weights file not found: {WEIGHTS_PATH}")
 
 
 # =========================
@@ -200,7 +100,7 @@ def preprocess_image(file_bytes: bytes):
 
 def predict_bytes(file_bytes: bytes, threshold: float):
     pil_img, x = preprocess_image(file_bytes)
-    prob = float(model.predict(x, verbose=0)[0][0])
+    prob = float(model.predict(x, verbose=0)[0][0])  # P(label=1) => Normal
 
     label = 1 if prob >= threshold else 0
     prediction = CLASS_NAMES[label]
@@ -208,11 +108,20 @@ def predict_bytes(file_bytes: bytes, threshold: float):
 
     return {
         "prediction": prediction,
-        "confidence": confidence * 100,
-        "prob_label1": prob,
-        "threshold": threshold,
+        "confidence": round(confidence * 100, 2),
+        "prob_label1": round(prob, 6),
+        "threshold": float(threshold),
+        "label0": CLASS_NAMES[0],
         "label1": CLASS_NAMES[1],
     }, pil_img
+
+
+def pil_to_data_uri(pil_img: Image.Image) -> str:
+    """For preview in HTML page."""
+    buf = io.BytesIO()
+    pil_img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
+    return f"data:image/png;base64,{b64}"
 
 
 def draw_pdf_header(c, width, height):
@@ -229,10 +138,11 @@ def draw_pdf_header(c, width, height):
     c.drawRightString(width - 40, top_y, STAGE_TEXT)
     c.drawRightString(width - 40, top_y - 20, ACADEMIC_YEAR_TEXT)
 
+    c.setLineWidth(1)
     c.line(40, height - 150, width - 40, height - 150)
 
 
-def build_pdf(result, pil_img):
+def build_pdf(result, pil_img: Image.Image):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
@@ -253,27 +163,34 @@ def build_pdf(result, pil_img):
     c.setFont("Helvetica", 11)
     c.drawString(40, y - 20, f"Prediction: {result['prediction']}")
     c.drawString(40, y - 40, f"Confidence: {result['confidence']:.2f}%")
-    c.drawString(40, y - 60, f"Raw Sigmoid P(label=1): {result['prob_label1']:.4f}")
-    c.drawString(40, y - 80, f"Threshold: {result['threshold']}")
+    c.drawString(40, y - 60, f"Raw Sigmoid P(label=1): {result['prob_label1']:.6f} (label=1 -> {result['label1']})")
+    c.drawString(40, y - 80, f"Threshold: {result['threshold']:.2f}")
 
+    # ---- صورة أصغر حتى لا تغطي النص ----
     img_buf = io.BytesIO()
-    pil_img.save(img_buf, format="PNG")
+    pil_img.convert("RGB").save(img_buf, format="PNG")
     img_buf.seek(0)
+
+    # مكان الصورة: تحت النتائج، بحجم أصغر وارتفاع ثابت
+    img_x = 80
+    img_y = 120
+    img_w = width - 160
+    img_h = 260  # <-- هذا هو التصغير (غيّره إذا تريد أكبر/أصغر)
+
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, img_y + img_h + 15, "Analyzed X-ray Image")
 
     c.drawImage(
         ImageReader(img_buf),
-        40, 90,
-        width=width - 80,
-        height=y - 130,
+        img_x, img_y,
+        width=img_w, height=img_h,
         preserveAspectRatio=True,
+        anchor='c',
         mask="auto"
     )
 
     c.setFont("Helvetica-Oblique", 9)
-    c.drawString(
-        40, 60,
-        "Disclaimer: Educational use only. Not a medical diagnosis."
-    )
+    c.drawString(40, 80, "Disclaimer: Educational use only. Not a medical diagnosis.")
 
     c.showPage()
     c.save()
@@ -286,7 +203,13 @@ def build_pdf(result, pil_img):
 # =========================
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    # صفحة البداية بدون نتائج
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "result": None,
+        "img_preview": None,
+        "threshold": 0.5
+    })
 
 
 @app.get("/health")
@@ -298,18 +221,32 @@ def health():
     }
 
 
+@app.post("/ui/predict", response_class=HTMLResponse)
+async def ui_predict(
+    request: Request,
+    file: UploadFile = File(...),
+    threshold: float = Form(0.5),
+):
+    file_bytes = await file.read()
+    result, pil_img = predict_bytes(file_bytes, threshold)
+    img_preview = pil_to_data_uri(pil_img)
+
+    return templates.TemplateResponse("index.html", {
+        "request": request,
+        "result": result,
+        "img_preview": img_preview,
+        "threshold": threshold
+    })
+
+
 @app.post("/predict")
-async def predict(
+async def predict_api(
     file: UploadFile = File(...),
     threshold: float = Form(0.5),
 ):
     file_bytes = await file.read()
     result, _ = predict_bytes(file_bytes, threshold)
-    return JSONResponse({
-        "prediction": result["prediction"],
-        "confidence": round(result["confidence"], 2),
-        "prob_label1": round(result["prob_label1"], 6),
-    })
+    return JSONResponse(result)
 
 
 @app.post("/report")
@@ -322,7 +259,6 @@ async def report(
     pdf = build_pdf(result, pil_img)
 
     filename = f"covid_xray_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-
     return StreamingResponse(
         pdf,
         media_type="application/pdf",
