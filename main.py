@@ -1,13 +1,15 @@
 import io
 import os
 import base64
+import hashlib
 from datetime import datetime
+from typing import Optional
 
 import numpy as np
 from PIL import Image
 
-from fastapi import FastAPI, UploadFile, File, Form, Request
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi import FastAPI, UploadFile, File, Form, Request, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -23,14 +25,14 @@ from reportlab.lib.utils import ImageReader
 # =========================
 # CONFIG
 # =========================
-CLASS_NAMES = ["COVID", "Normal"]  # label0, label1
+CLASS_NAMES = ["COVID", "Normal"]   # label0, label1
 IMG_SIZE = (224, 224)
 
 WEIGHTS_PATH = "covid.weights.h5"
 LOGO_PATH = "static/logo.png"
 
 STAGE_TEXT = "Fourth Year"
-ACADEMIC_YEAR_TEXT = "Academic Year 2025-2026"  # استخدم - بدل –
+ACADEMIC_YEAR_TEXT = "Academic Year 2025-2026"
 
 LEFT_HEADER_LINES = [
     "Republic of Iraq",
@@ -41,13 +43,23 @@ LEFT_HEADER_LINES = [
     "Dept. of Radiology Techniques",
 ]
 
+# ---- Simple in-memory store for last diagnosis (single-user friendly) ----
+LAST_STATE = {
+    "img_bytes": None,          # type: Optional[bytes]
+    "threshold": 0.5,           # type: float
+    "patient_name": "",         # type: str
+    "examiner_name": "",        # type: str
+    "result": None,             # type: Optional[dict]
+    "img_preview": None,        # type: Optional[str]
+    "updated_at": None,         # type: Optional[str]
+}
+
 
 # =========================
 # APP
 # =========================
 app = FastAPI(title="COVID X-ray API (MobileNetV2)", version="1.0.0")
 
-# تأكد أن مجلد static موجود
 if not os.path.isdir("static"):
     os.makedirs("static", exist_ok=True)
 
@@ -117,7 +129,6 @@ def predict_bytes(file_bytes: bytes, threshold: float):
 
 
 def pil_to_data_uri(pil_img: Image.Image) -> str:
-    """For preview in HTML page."""
     buf = io.BytesIO()
     pil_img.save(buf, format="PNG")
     b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
@@ -142,7 +153,7 @@ def draw_pdf_header(c, width, height):
     c.line(40, height - 150, width - 40, height - 150)
 
 
-def build_pdf(result, pil_img: Image.Image):
+def build_pdf(result: dict, pil_img: Image.Image, patient_name: str, examiner_name: str):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
@@ -156,29 +167,35 @@ def build_pdf(result, pil_img: Image.Image):
     ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     c.drawString(40, height - 220, f"Generated: {ts}")
 
-    y = height - 260
+    # Patient / Examiner
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, height - 245, "Patient / Examiner Information")
+    c.setFont("Helvetica", 11)
+    c.drawString(40, height - 265, f"Patient Name: {patient_name or '-'}")
+    c.drawString(40, height - 283, f"Examiner Name: {examiner_name or '-'}")
+
+    # Results
+    y = height - 315
     c.setFont("Helvetica-Bold", 12)
     c.drawString(40, y, "Prediction Result")
-
     c.setFont("Helvetica", 11)
     c.drawString(40, y - 20, f"Prediction: {result['prediction']}")
     c.drawString(40, y - 40, f"Confidence: {result['confidence']:.2f}%")
     c.drawString(40, y - 60, f"Raw Sigmoid P(label=1): {result['prob_label1']:.6f} (label=1 -> {result['label1']})")
     c.drawString(40, y - 80, f"Threshold: {result['threshold']:.2f}")
 
-    # ---- صورة أصغر حتى لا تغطي النص ----
+    # Image (smaller)
     img_buf = io.BytesIO()
     pil_img.convert("RGB").save(img_buf, format="PNG")
     img_buf.seek(0)
 
-    # مكان الصورة: تحت النتائج، بحجم أصغر وارتفاع ثابت
     img_x = 80
-    img_y = 120
+    img_y = 110
     img_w = width - 160
-    img_h = 260  # <-- هذا هو التصغير (غيّره إذا تريد أكبر/أصغر)
+    img_h = 240  # smaller to avoid overlapping text
 
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(40, img_y + img_h + 15, "Analyzed X-ray Image")
+    c.drawString(40, img_y + img_h + 12, "Analyzed X-ray Image")
 
     c.drawImage(
         ImageReader(img_buf),
@@ -190,7 +207,7 @@ def build_pdf(result, pil_img: Image.Image):
     )
 
     c.setFont("Helvetica-Oblique", 9)
-    c.drawString(40, 80, "Disclaimer: Educational use only. Not a medical diagnosis.")
+    c.drawString(40, 80, "Disclaimer: Educational/research use only. Not a medical diagnosis.")
 
     c.showPage()
     c.save()
@@ -203,12 +220,15 @@ def build_pdf(result, pil_img: Image.Image):
 # =========================
 @app.get("/", response_class=HTMLResponse)
 def home(request: Request):
-    # صفحة البداية بدون نتائج
     return templates.TemplateResponse("index.html", {
         "request": request,
-        "result": None,
-        "img_preview": None,
-        "threshold": 0.5
+        "result": LAST_STATE["result"],
+        "img_preview": LAST_STATE["img_preview"],
+        "threshold": LAST_STATE["threshold"],
+        "patient_name": LAST_STATE["patient_name"],
+        "examiner_name": LAST_STATE["examiner_name"],
+        "has_last": LAST_STATE["img_bytes"] is not None,
+        "updated_at": LAST_STATE["updated_at"],
     })
 
 
@@ -226,17 +246,56 @@ async def ui_predict(
     request: Request,
     file: UploadFile = File(...),
     threshold: float = Form(0.5),
+    patient_name: str = Form(""),
+    examiner_name: str = Form(""),
 ):
     file_bytes = await file.read()
     result, pil_img = predict_bytes(file_bytes, threshold)
     img_preview = pil_to_data_uri(pil_img)
 
+    LAST_STATE["img_bytes"] = file_bytes
+    LAST_STATE["threshold"] = float(threshold)
+    LAST_STATE["patient_name"] = patient_name.strip()
+    LAST_STATE["examiner_name"] = examiner_name.strip()
+    LAST_STATE["result"] = result
+    LAST_STATE["img_preview"] = img_preview
+    LAST_STATE["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
     return templates.TemplateResponse("index.html", {
         "request": request,
         "result": result,
         "img_preview": img_preview,
-        "threshold": threshold
+        "threshold": threshold,
+        "patient_name": patient_name,
+        "examiner_name": examiner_name,
+        "has_last": True,
+        "updated_at": LAST_STATE["updated_at"],
     })
+
+
+@app.post("/report_last")
+async def report_last():
+    """Generate PDF using the last diagnosed image (no re-upload)."""
+    if LAST_STATE["img_bytes"] is None or LAST_STATE["result"] is None:
+        raise HTTPException(status_code=400, detail="No diagnosis found yet. Please diagnose an image first.")
+
+    file_bytes = LAST_STATE["img_bytes"]
+    threshold = LAST_STATE["threshold"]
+    patient_name = LAST_STATE["patient_name"]
+    examiner_name = LAST_STATE["examiner_name"]
+
+    # Use stored result if available, but rebuild image object for PDF
+    result = LAST_STATE["result"]
+    pil_img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+
+    pdf = build_pdf(result, pil_img, patient_name, examiner_name)
+    filename = f"covid_xray_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
+
+    return StreamingResponse(
+        pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'}
+    )
 
 
 @app.post("/predict")
@@ -247,20 +306,3 @@ async def predict_api(
     file_bytes = await file.read()
     result, _ = predict_bytes(file_bytes, threshold)
     return JSONResponse(result)
-
-
-@app.post("/report")
-async def report(
-    file: UploadFile = File(...),
-    threshold: float = Form(0.5),
-):
-    file_bytes = await file.read()
-    result, pil_img = predict_bytes(file_bytes, threshold)
-    pdf = build_pdf(result, pil_img)
-
-    filename = f"covid_xray_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
-    return StreamingResponse(
-        pdf,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-    )
