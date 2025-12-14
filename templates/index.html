@@ -15,12 +15,14 @@
     .right { text-align:right; font-size:12px; line-height:1.35; }
     h1 { margin:10px 0 0; font-size:20px; }
     .grid { display:grid; grid-template-columns: 1fr 1fr; gap:16px; }
-    .btn { background:#111; color:#fff; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; }
+    .btn { background:#111; color:#fff; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; width:100%; }
     .btn2 { background:#2d6cdf; }
     .box { border:1px dashed #cfd6ea; padding:12px; border-radius:12px; background:#fbfcff; }
     img.preview { width:100%; max-height:420px; object-fit:contain; border-radius:12px; border:1px solid #e6e8ef; background:#fff; }
     .kv { font-size:14px; line-height:1.6; }
     .muted { color:#666; font-size:12px; }
+    input[type="text"], input[type="number"] { width:100%; padding:10px; border-radius:10px; border:1px solid #e6e8ef; }
+    input[type="file"] { width:100%; }
     @media (max-width: 860px){ .grid{ grid-template-columns:1fr; } .right,.left{ display:none; } }
   </style>
 </head>
@@ -39,12 +41,12 @@
         <div class="mid">
           <img src="/static/logo.png" alt="Logo">
           <h1>COVID X-ray Classification (MobileNetV2)</h1>
-          <div class="muted">Upload an X-ray image and get prediction + PDF report.</div>
+          <div class="muted">Upload an X-ray image, get result, then download PDF (no re-upload).</div>
         </div>
 
         <div class="right">
           <div><b>Stage:</b> Fourth Year</div>
-          <div><b>Academic Year:</b> 2025-2026</div>
+          <div><b>Academic Year:</b> 2025–2026</div>
         </div>
       </div>
 
@@ -56,7 +58,23 @@
             <div style="height:10px"></div>
 
             <div class="muted">Threshold (default 0.5)</div>
-            <input type="number" step="0.01" min="0" max="1" name="threshold" value="{{ threshold if threshold is not none else 0.5 }}" />
+            <input type="number" step="0.01" min="0" max="1" name="threshold"
+                   value="{{ threshold if threshold is not none else 0.5 }}" />
+
+            <div style="height:10px"></div>
+
+            <div class="muted">Patient Name</div>
+            <input type="text" name="patient_name" value="{{ patient_name or '' }}" />
+
+            <div style="height:10px"></div>
+
+            <div class="muted">Patient Age</div>
+            <input type="number" name="patient_age" min="0" max="120" value="{{ patient_age or '' }}" />
+
+            <div style="height:10px"></div>
+
+            <div class="muted">Examiner Name</div>
+            <input type="text" name="examiner_name" value="{{ examiner_name or '' }}" />
 
             <div style="height:14px"></div>
             <button class="btn" type="submit">Diagnose</button>
@@ -64,13 +82,18 @@
 
           <div style="height:12px"></div>
 
-          <form action="/report" method="post" enctype="multipart/form-data">
-            <div class="muted">Download PDF report (re-upload same image)</div>
-            <input type="file" name="file" accept="image/*" required />
+          {% if img_b64 %}
+          <form action="/ui/report" method="post">
+            <input type="hidden" name="img_b64" value="{{ img_b64 }}">
             <input type="hidden" name="threshold" value="{{ threshold if threshold is not none else 0.5 }}">
-            <div style="height:10px"></div>
+            <input type="hidden" name="patient_name" value="{{ patient_name or '' }}">
+            <input type="hidden" name="patient_age" value="{{ patient_age or '' }}">
+            <input type="hidden" name="examiner_name" value="{{ examiner_name or '' }}">
             <button class="btn btn2" type="submit">Download PDF</button>
           </form>
+          {% else %}
+            <div class="muted">Run Diagnose first to enable PDF download.</div>
+          {% endif %}
         </div>
 
         <div class="box">
@@ -86,10 +109,12 @@
             <div style="height:12px"></div>
             <div class="kv">
               <div><b>Prediction:</b> {{ result.prediction }}</div>
-              <div><b>Confidence:</b> {{ result.confidence }}%</div>
-              <div><b>Raw Sigmoid P(label=1):</b> {{ result.prob_label1 }}</div>
-              <div><b>Threshold:</b> {{ result.threshold }}</div>
+              <div><b>Confidence:</b> {{ "%.2f"|format(result.confidence) }}%</div>
+              <div><b>Raw Sigmoid P(label=1):</b> {{ "%.6f"|format(result.prob_label1) }}</div>
+              <div><b>Threshold:</b> {{ "%.2f"|format(result.threshold) }}</div>
               <div class="muted">label0={{ result.label0 }}, label1={{ result.label1 }}</div>
+              <div style="height:8px"></div>
+              <div class="muted"><b>Patient:</b> {{ patient_name or "-" }} | <b>Age:</b> {{ patient_age or "-" }} | <b>Examiner:</b> {{ examiner_name or "-" }}</div>
             </div>
           {% endif %}
         </div>
