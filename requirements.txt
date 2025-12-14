@@ -1,7 +1,8 @@
-fastapi==0.115.6
-uvicorn[standard]==0.34.0
-python-multipart==0.0.20
-pillow==11.0.0
-numpy==1.26.4
-reportlab==4.2.5
-tensorflow-cpu==2.15.0
+fastapi
+uvicorn[standard]
+python-multipart
+jinja2
+pillow
+numpy
+reportlab
+tensorflow-cpu==2.20.0
