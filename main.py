@@ -155,14 +155,20 @@ def build_pdf(result, pil_img):
     pil_img.save(img_buf, format="PNG")
     img_buf.seek(0)
 
-    c.drawImage(
-        ImageReader(img_buf),
-        40, 90,
-        width=width - 80,
-        height=y - 130,
-        preserveAspectRatio=True,
-        mask="auto"
-    )
+# --- Smaller X-ray image ---
+img_width = width - 160     # تصغير العرض
+img_height = 220            # ارتفاع ثابت وصغير
+
+c.drawImage(
+    ImageReader(img_buf),
+    80,                      # إزاحة من اليسار
+    90,                      # مكان مناسب أسفل النص
+    width=img_width,
+    height=img_height,
+    preserveAspectRatio=True,
+    mask="auto"
+)
+
 
     c.setFont("Helvetica-Oblique", 9)
     c.drawString(
@@ -223,3 +229,4 @@ async def report(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
+
