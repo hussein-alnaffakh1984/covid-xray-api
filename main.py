@@ -5,319 +5,262 @@ from datetime import datetime
 import numpy as np
 from PIL import Image
 
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, Form, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
-
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib.units import cm
+from fastapi.templating import Jinja2Templates
 
 import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.applications import MobileNetV2
 
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib.utils import ImageReader
+
 
 # =========================
-# App Info (ثابتة للتقرير والواجهة)
+# CONFIG (Edit if needed)
 # =========================
-UNIVERSITY = "جامعة الكفيل"
-COLLEGE = "كلية التقنيات الصحية والطبية"
-DEPARTMENT = "قسم الأشعة"
-STAGE = "المرحلة الرابعة"
-PROJECT_TITLE = "COVID X-ray Classification (MobileNetV2)"
-
-CLASS_NAMES = ["COVID", "Normal"]  # نفس ترتيب التدريب عندك
+CLASS_NAMES = ["COVID", "Normal"]       # Must match training order
 IMG_SIZE = (224, 224)
 
-WEIGHTS_PATH = "covid.weights.h5"  # تأكد هذا الاسم مطابق في GitHub
+WEIGHTS_PATH = "covid.weights.h5"       # <-- ensure this file exists in repo root
+LOGO_PATH = "static/logo.png"           # <-- ensure exists
+
+STAGE_TEXT = "Stage: Fourth Year"
+ACADEMIC_YEAR_TEXT = "Academic Year: 2025–2026"
+
+LEFT_HEADER_LINES = [
+    "Republic of Iraq",
+    "Ministry of Higher Education",
+    "and Scientific Research",
+    "University of Alkafeel",
+    "College of Health & Medical Technology",
+    "Dept. of Radiology Techniques",
+]
 
 
+# =========================
+# APP
+# =========================
 app = FastAPI(title="COVID X-ray API (MobileNetV2)", version="1.0.0")
-
-# Static files
 app.mount("/static", StaticFiles(directory="static"), name="static")
+templates = Jinja2Templates(directory="templates")
 
 
+# =========================
+# MODEL
+# =========================
 def build_model():
-    # نفس المعمارية (بدون augmentation عند inference)
-    base_model = MobileNetV2(
+    base = MobileNetV2(
         input_shape=(224, 224, 3),
         include_top=False,
         weights="imagenet",
     )
-    base_model.trainable = False
+    base.trainable = False
 
     model = models.Sequential([
         layers.Input(shape=(224, 224, 3)),
         layers.Rescaling(1.0 / 255.0),
-        base_model,
+        base,
         layers.GlobalAveragePooling2D(),
         layers.Dense(128, activation="relu"),
         layers.Dropout(0.5),
         layers.Dense(1, activation="sigmoid"),
     ])
-
-    # compile غير ضروري للاستدلال
     return model
 
 
-# تحميل الموديل مرة واحدة عند تشغيل السيرفر
-MODEL = build_model()
-if os.path.exists(WEIGHTS_PATH):
-    MODEL.load_weights(WEIGHTS_PATH)
+model = build_model()
+
+if not os.path.exists(WEIGHTS_PATH):
+    print(f"❌ Weights file not found: {WEIGHTS_PATH}")
 else:
-    print(f"⚠️ Weights not found: {WEIGHTS_PATH}")
+    model.load_weights(WEIGHTS_PATH)
+    print(f"✅ Weights loaded: {WEIGHTS_PATH}")
 
 
 def preprocess_image(file_bytes: bytes):
+    # Return both PIL (for preview/pdf) and numpy batch (for model)
     img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
     img_resized = img.resize(IMG_SIZE)
     x = np.array(img_resized, dtype=np.float32)
-    x = np.expand_dims(x, axis=0)
+    x = np.expand_dims(x, axis=0)  # (1,224,224,3)
     return img, x
 
 
-def predict_from_bytes(file_bytes: bytes, threshold: float = 0.5):
-    original_img, x = preprocess_image(file_bytes)
+def predict_bytes(file_bytes: bytes, threshold: float = 0.5):
+    pil_img, x = preprocess_image(file_bytes)
 
-    prob_label1 = float(MODEL.predict(x, verbose=0)[0][0])  # P(label=1)=CLASS_NAMES[1]
+    # P(label=1) = P(CLASS_NAMES[1])
+    prob_label1 = float(model.predict(x, verbose=0)[0][0])
+
     pred_label = 1 if prob_label1 >= threshold else 0
     pred_name = CLASS_NAMES[pred_label]
     confidence = (prob_label1 if pred_label == 1 else (1 - prob_label1)) * 100.0
 
     return {
         "prob_label1": prob_label1,
-        "threshold": threshold,
+        "threshold": float(threshold),
         "prediction": pred_name,
         "confidence": confidence,
         "label0": CLASS_NAMES[0],
         "label1": CLASS_NAMES[1],
-    }, original_img
+    }, pil_img
 
 
-def make_pdf_report(result: dict, original_img: Image.Image):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
+def pdf_header(c: canvas.Canvas, width: float, height: float):
+    """
+    Draw:
+    - LEFT: official lines
+    - CENTER: logo
+    - RIGHT: stage + academic year
+    """
+    top_y = height - 60
+    left_x = 40
+
+    c.setFont("Helvetica-Bold", 11)
+    line_gap = 15
+    for i, line in enumerate(LEFT_HEADER_LINES):
+        c.drawString(left_x, top_y - i * line_gap, line)
+
+    # Center logo
+    if os.path.exists(LOGO_PATH):
+        c.drawImage(
+            LOGO_PATH,
+            (width / 2) - 40,
+            height - 120,
+            width=80,
+            height=80,
+            mask="auto"
+        )
+
+    # Right block
+    right_x = width - 200
+    c.drawString(right_x, top_y, STAGE_TEXT)
+    c.drawString(right_x, top_y - 20, ACADEMIC_YEAR_TEXT)
+
+    # Separator line
+    c.setLineWidth(1)
+    c.line(40, height - 150, width - 40, height - 150)
+
+
+def build_pdf_report(result: dict, pil_img: Image.Image) -> io.BytesIO:
+    buff = io.BytesIO()
+    c = canvas.Canvas(buff, pagesize=A4)
     width, height = A4
 
     # Header
-    logo_path = os.path.join("static", "logo.png")
-    y = height - 2.0 * cm
+    pdf_header(c, width, height)
 
-    # Draw logo (left)
-    if os.path.exists(logo_path):
-        c.drawImage(logo_path, 1.5 * cm, y - 1.2 * cm, width=2.2 * cm, height=2.2 * cm, mask='auto')
+    # Title
+    c.setFont("Helvetica-Bold", 16)
+    c.drawCentredString(width / 2, height - 190, "COVID-19 X-ray Classification Report")
 
-    # Title text
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(4.2 * cm, y, UNIVERSITY)
+    # Timestamp
     c.setFont("Helvetica", 11)
-    c.drawString(4.2 * cm, y - 0.7 * cm, f"{COLLEGE} — {DEPARTMENT}")
-    c.drawString(4.2 * cm, y - 1.4 * cm, f"{STAGE} | {PROJECT_TITLE}")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    c.drawString(40, height - 220, f"Generated: {ts}")
 
-    c.setLineWidth(1)
-    c.line(1.5 * cm, y - 2.0 * cm, width - 1.5 * cm, y - 2.0 * cm)
-
-    # Info block
-    y2 = y - 3.0 * cm
+    # Results block
+    y = height - 255
     c.setFont("Helvetica-Bold", 12)
-    c.drawString(1.5 * cm, y2, "نتيجة الفحص")
+    c.drawString(40, y, "Prediction Result")
     c.setFont("Helvetica", 11)
+    c.drawString(40, y - 20, f"Prediction: {result['prediction']}")
+    c.drawString(40, y - 40, f"Confidence: {result['confidence']:.2f}%")
+    c.drawString(40, y - 60, f"Raw Sigmoid P(label=1): {result['prob_label1']:.4f}  (label=1 -> {result['label1']})")
+    c.drawString(40, y - 80, f"Decision Threshold: {result['threshold']:.2f}")
 
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    c.drawString(1.5 * cm, y2 - 0.8 * cm, f"التاريخ والوقت: {now_str}")
-    c.drawString(1.5 * cm, y2 - 1.6 * cm, f"Prediction: {result['prediction']}")
-    c.drawString(1.5 * cm, y2 - 2.4 * cm, f"Confidence: {result['confidence']:.2f}%")
-    c.drawString(1.5 * cm, y2 - 3.2 * cm, f"Raw sigmoid P(label=1): {result['prob_label1']:.4f}")
-    c.drawString(1.5 * cm, y2 - 4.0 * cm, f"Threshold: {result['threshold']}")
+    # Image section
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(40, y - 115, "Analyzed X-ray Image")
 
-    # Add X-ray image
-    # نحفظ الصورة مؤقتًا داخل الذاكرة
+    # Convert PIL to buffer for ReportLab
     img_buf = io.BytesIO()
-    original_img_rgb = original_img.convert("RGB")
-    original_img_rgb.save(img_buf, format="PNG")
+    pil_img.convert("RGB").save(img_buf, format="PNG")
     img_buf.seek(0)
 
-    c.setFont("Helvetica-Bold", 12)
-    c.drawString(1.5 * cm, y2 - 5.2 * cm, "صورة الأشعة المرفوعة")
+    # Draw image
+    img_x = 40
+    img_y = 90
+    img_w = width - 80
+    img_h = (y - 135) - img_y
+    if img_h < 200:
+        img_h = 200
 
-    # Place image box
-    img_x = 1.5 * cm
-    img_y = 2.5 * cm
-    img_w = width - 3.0 * cm
-    img_h = (y2 - 6.0 * cm) - img_y
+    c.drawImage(
+        ImageReader(img_buf),
+        img_x, img_y,
+        width=img_w, height=img_h,
+        preserveAspectRatio=True,
+        anchor='c',
+        mask="auto"
+    )
 
-    c.drawImage(ImageReader(img_buf), img_x, img_y, width=img_w, height=img_h, preserveAspectRatio=True, anchor='c')
-
-    # Footer
+    # Disclaimer
     c.setFont("Helvetica-Oblique", 9)
-    c.drawString(1.5 * cm, 1.5 * cm, "ملاحظة: هذا النموذج تعليمي/بحث تخرج ولا يُستخدم كتشخيص طبي نهائي.")
+    c.drawString(
+        40, 60,
+        "Disclaimer: This AI result is for educational/research use only and must not be used as a standalone medical diagnosis."
+    )
 
     c.showPage()
     c.save()
-
-    buffer.seek(0)
-    return buffer
-
-
-# لازم استيراد ImageReader بعد ما نستخدمه
-from reportlab.lib.utils import ImageReader
+    buff.seek(0)
+    return buff
 
 
+# =========================
+# ROUTES
+# =========================
 @app.get("/", response_class=HTMLResponse)
-def home():
-    # صفحة بسيطة بدل تفاصيل /docs
-    html = """
-<!doctype html>
-<html lang="ar" dir="rtl">
-<head>
-  <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>COVID X-ray</title>
-  <style>
-    body{font-family:Arial, sans-serif; background:#f6f7fb; margin:0; padding:0;}
-    .wrap{max-width:900px; margin:24px auto; padding:16px;}
-    .card{background:#fff; border-radius:14px; padding:18px; box-shadow:0 6px 20px rgba(0,0,0,.06);}
-    .header{display:flex; align-items:center; gap:12px; margin-bottom:12px;}
-    .logo{width:64px; height:64px; object-fit:contain;}
-    .title h1{margin:0; font-size:20px;}
-    .title p{margin:4px 0 0; color:#555;}
-    .grid{display:grid; grid-template-columns:1fr 1fr; gap:16px;}
-    @media (max-width:820px){ .grid{grid-template-columns:1fr;} }
-    .box{border:1px dashed #bbb; border-radius:12px; padding:12px; background:#fafafa;}
-    .btn{display:inline-block; padding:10px 14px; border-radius:10px; border:0; cursor:pointer; font-weight:700;}
-    .btn-primary{background:#2b6cb0; color:#fff;}
-    .btn-secondary{background:#111; color:#fff;}
-    .muted{color:#666; font-size:13px;}
-    img.preview{width:100%; max-height:380px; object-fit:contain; border-radius:10px; background:#fff;}
-    .result{margin-top:10px; padding:10px; background:#f1f5ff; border-radius:10px;}
-    .row{display:flex; gap:10px; flex-wrap:wrap; align-items:center;}
-    input[type="file"]{width:100%;}
-  </style>
-</head>
-<body>
-  <div class="wrap">
-    <div class="card">
-      <div class="header">
-        <img class="logo" src="/static/logo.png" alt="logo"/>
-        <div class="title">
-          <h1>جامعة الكفيل — كلية التقنيات الصحية والطبية</h1>
-          <p>قسم الأشعة | المرحلة الرابعة — COVID X-ray Classification (MobileNetV2)</p>
-        </div>
-      </div>
-
-      <div class="grid">
-        <div class="box">
-          <h3 style="margin-top:0;">رفع صورة الأشعة</h3>
-          <input id="file" type="file" accept="image/*"/>
-          <div class="muted" style="margin-top:8px;">ارفع JPG/PNG ثم اضغط “تشخيص”.</div>
-
-          <div style="margin-top:12px;" class="row">
-            <label>Threshold:</label>
-            <input id="thr" type="number" min="0.1" max="0.9" step="0.05" value="0.5"/>
-            <button class="btn btn-primary" onclick="runPredict()">تشخيص</button>
-            <button class="btn btn-secondary" onclick="downloadPDF()" id="pdfBtn" disabled>تحميل تقرير PDF</button>
-          </div>
-
-          <div id="out" class="result" style="display:none;"></div>
-        </div>
-
-        <div class="box">
-          <h3 style="margin-top:0;">معاينة الصورة</h3>
-          <img id="preview" class="preview" src="" alt="preview" style="display:none;"/>
-          <div id="noimg" class="muted">لم يتم رفع صورة بعد.</div>
-        </div>
-      </div>
-
-      <div class="muted" style="margin-top:14px;">
-        Swagger للتجربة التقنية: <a href="/docs" target="_blank">/docs</a>
-      </div>
-    </div>
-  </div>
-
-<script>
-let lastFile = null;
-document.getElementById("file").addEventListener("change", (e)=>{
-  const f = e.target.files?.[0];
-  lastFile = f || null;
-  const img = document.getElementById("preview");
-  const noimg = document.getElementById("noimg");
-  if(!lastFile){ img.style.display="none"; noimg.style.display="block"; return; }
-  img.src = URL.createObjectURL(lastFile);
-  img.style.display="block";
-  noimg.style.display="none";
-  document.getElementById("out").style.display="none";
-  document.getElementById("pdfBtn").disabled = true;
-});
-
-async function runPredict(){
-  if(!lastFile){ alert("ارفع صورة أولاً"); return; }
-  const thr = parseFloat(document.getElementById("thr").value || "0.5");
-  const fd = new FormData();
-  fd.append("file", lastFile);
-  fd.append("threshold", String(thr));
-
-  const res = await fetch("/predict", { method:"POST", body: fd });
-  const data = await res.json();
-
-  const out = document.getElementById("out");
-  out.style.display = "block";
-  out.innerHTML = `
-    <b>Prediction:</b> ${data.prediction}<br/>
-    <b>Confidence:</b> ${data.confidence.toFixed(2)}%<br/>
-    <b>Raw P(label=1):</b> ${data.prob_label1.toFixed(4)}<br/>
-    <b>Threshold:</b> ${data.threshold}
-  `;
-  document.getElementById("pdfBtn").disabled = false;
-}
-
-async function downloadPDF(){
-  if(!lastFile){ alert("ارفع صورة أولاً"); return; }
-  const thr = parseFloat(document.getElementById("thr").value || "0.5");
-  const fd = new FormData();
-  fd.append("file", lastFile);
-  fd.append("threshold", String(thr));
-
-  const res = await fetch("/report", { method:"POST", body: fd });
-  if(!res.ok){ alert("حدث خطأ أثناء توليد التقرير"); return; }
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url;
-  a.download = "covid_xray_report.pdf";
-  a.click();
-  URL.revokeObjectURL(url);
-}
-</script>
-</body>
-</html>
-"""
-    return HTMLResponse(html)
+def home(request: Request):
+    """
+    Requires templates/index.html (provided below).
+    """
+    return templates.TemplateResponse("index.html", {"request": request})
 
 
 @app.get("/health")
 def health():
-    ok = os.path.exists(WEIGHTS_PATH)
-    return {"status": "ok", "weights_found": ok}
+    return {
+        "status": "ok",
+        "weights_found": os.path.exists(WEIGHTS_PATH),
+        "logo_found": os.path.exists(LOGO_PATH),
+        "class_names": CLASS_NAMES,
+    }
 
 
 @app.post("/predict")
-async def predict(file: UploadFile = File(...), threshold: float = 0.5):
+async def predict(
+    file: UploadFile = File(...),
+    threshold: float = Form(0.5),
+):
     file_bytes = await file.read()
-    result, _ = predict_from_bytes(file_bytes, threshold=threshold)
-    return JSONResponse(result)
+    result, _ = predict_bytes(file_bytes, threshold=threshold)
+    # round for clean UI
+    return JSONResponse({
+        **result,
+        "confidence": round(result["confidence"], 2),
+        "prob_label1": round(result["prob_label1"], 6),
+    })
 
 
 @app.post("/report")
-async def report(file: UploadFile = File(...), threshold: float = 0.5):
+async def report(
+    file: UploadFile = File(...),
+    threshold: float = Form(0.5),
+):
     file_bytes = await file.read()
-    result, original_img = predict_from_bytes(file_bytes, threshold=threshold)
+    result, pil_img = predict_bytes(file_bytes, threshold=threshold)
 
-    pdf_buf = make_pdf_report(result, original_img)
+    pdf_buf = build_pdf_report(result, pil_img)
+    filename = f"covid_xray_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
 
     return StreamingResponse(
         pdf_buf,
         media_type="application/pdf",
-        headers={"Content-Disposition": "attachment; filename=covid_xray_report.pdf"}
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
